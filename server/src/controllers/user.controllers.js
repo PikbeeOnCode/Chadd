@@ -41,13 +41,8 @@ const registerUser = asyncHandler(async (req, res) => {
        throw new apiError(400,"All fields are required");
    }
 
-    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#])[A-Za-z\d@$!%*?&#]{8,}$/;
 
-    if (!passwordRegex.test(password)) {
-    throw new apiError(422, "Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a special character");
-    }
-
-//   validatingg emailll domains 
+   //   validatingg emailll domains 
    const allowedDomains = ['gmail.com', 'yahoo.com', 'outlook.com', 'hotmail.com', 'icloud.com'];
 
     const emailDomain = email.split('@')[1]?.toLowerCase();
@@ -55,6 +50,15 @@ const registerUser = asyncHandler(async (req, res) => {
     if (!allowedDomains.includes(emailDomain)) {
     throw new apiError(400, "Please register with a Gmail, Yahoo, or Outlook email");
     }
+   
+
+    const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#])[A-Za-z\d@$!%*?&#]{8,}$/;
+
+    if (!passwordRegex.test(password)) {
+    throw new apiError(422, "Password must be at least 8 characters and include an uppercase letter, a lowercase letter, a number, and a special character");
+    }
+
+
 
    const existingUser = await db.query("select * from users where email = $1",[email]);
 
@@ -143,6 +147,39 @@ const registerUser = asyncHandler(async (req, res) => {
    )
 });
 
+const verifyEmail = asyncHandler(async(req,res)=>{
+    const {token} = req.query ; 
+    if(!token){
+       throw new  apiError(400,"token not available");
+    };
+
+    const user = await db.query(`select * from users where verification_token = $1`, [
+        token
+    ]);
+
+    if(user.rows.length === 0){
+      throw  new  apiError(400,"user not found ");
+    };
+
+    if(user.rows[0].verification_token_expires_at < new Date()){
+      throw  new  apiError(401,"token is expired");
+    }
+
+    await db.query(` update users  set email_verified =  true  , verification_token = null ,verification_token_expires_at = null where id = $1 returning * ` ,[
+        user.rows[0].id
+    ]);
+
+    res.status(200).
+    json(
+        new apiResponse(
+            200,
+            {},
+            "user email is verified"
+        )
+    )
+})
+
 export {
-    registerUser
+    registerUser,
+    verifyEmail
 }
