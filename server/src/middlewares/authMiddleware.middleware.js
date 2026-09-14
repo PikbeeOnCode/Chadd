@@ -14,6 +14,7 @@ const verifyJwt = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
 
     // just set decoded user directly — no DB call needed!
+    console.log("decoded :",decoded);
     req.user = decoded;
     
     next();
