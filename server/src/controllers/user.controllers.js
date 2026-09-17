@@ -177,9 +177,143 @@ const verifyEmail = asyncHandler(async(req,res)=>{
             "user email is verified"
         )
     )
-})
+});
+
+
+
+    const loginUser = asyncHandler(async (req, res) => {
+        const {email,password} = req.body;
+
+        if([email,password].some(field=>field?.trim()==="")){
+            throw new apiError(400,"All fields are required");
+        }
+
+        const user = await db.query("select * from users where email = $1",[email]);
+        
+        if(user.rows.length === 0){
+            throw new apiError(400,"Invalid email or password");
+        };
+
+        if (!user.rows[0].is_active) {
+            throw new apiError(403, "This account has been deactivated");
+        }
+        const validPassword = await bcrypt.compare(password,user.rows[0].hash_password);
+
+        if(!validPassword){
+            throw new apiError(400,"Invalid email or password");
+        }
+
+
+
+        const { accessToken, refreshToken } = await generateToken(user.rows[0].id);
+        if(!accessToken || !refreshToken){
+            throw new apiError(500,"Failed to generate tokens");
+        }
+
+        
+    
+     const hashToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30);
+        
+        
+
+        const insertToken = await db.query(
+            `insert into refresh_tokens (user_id, token_hash, expires_at, revoked_at) 
+            values ($1, $2, $3, $4) 
+            returning *`,
+            [
+                user.rows[0].id,
+                hashToken,
+                expiresAt,
+                null
+            ]
+        );
+
+        if(!insertToken.rows[0]){
+            throw new apiError(500,"Failed to store refresh token");
+        }
+       
+        res
+        .status(200)
+        .cookie("refreshToken", refreshToken, options)
+        .cookie("accessToken", accessToken, options)
+        .json( new apiResponse(
+            200,{
+            user:{
+                id: user.rows[0].id,
+                username: user.rows[0].username,
+                email: user.rows[0].email,
+            
+            },
+            accessToken,
+            refreshToken
+            }
+        ,
+            "Login successful",
+        ))
+    });
+
+
+    const googleCallBack = asyncHandler(async(req,res)=>{
+        const user = req.user;
+        if(!user){
+             throw new apiError(401," user is not authenticated ");
+        }
+
+        if(user.is_active != true){
+            throw new apiError(403,"user account is deactivated");
+        };
+
+        const {accessToken,refreshToken} =  await generateToken(user.id);
+        if(!accessToken || !refreshToken){
+            throw new apiError(401,"refresh token and access token not available");
+        }
+
+         const hashRefreshToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30);
+        
+        
+
+        const insertToken = await db.query(
+            `insert into refresh_tokens (user_id, token_hash, expires_at, revoked_at) 
+            values ($1, $2, $3, $4) 
+            returning *`,
+            [
+                user.id,
+                hashRefreshToken,
+                expiresAt,
+                null
+            ]
+        );
+
+        if(!insertToken.rows[0]){
+            throw new apiError(500,"Failed to store refresh token");
+        }
+
+        const safeUser = {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            avatar_url: user.avatar_url,
+            email_verified: user.email_verified,
+        };
+
+        res.status(200)
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(new apiResponse(200, { user:safeUser}, "Google login successful"));
+
+
+    })
+
 
 export {
     registerUser,
-    verifyEmail
+    verifyEmail,
+    loginUser,
+    googleCallBack
 }
