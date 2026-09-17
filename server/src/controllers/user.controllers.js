@@ -271,6 +271,7 @@ const verifyEmail = asyncHandler(async(req,res)=>{
             throw new apiError(401,"refresh token and access token not available");
         }
 
+
          const hashRefreshToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
 
         const expiresAt = new Date();
@@ -308,12 +309,133 @@ const verifyEmail = asyncHandler(async(req,res)=>{
         .json(new apiResponse(200, { user:safeUser}, "Google login successful"));
 
 
-    })
+    });
+
+
+
+   const refreshTokenUser = asyncHandler(async(req,res)=>{
+    const refreshToken = req.cookies?.refreshToken || req.headers?.authorization?.replace("Bearer ", "");
+
+    if(!refreshToken){
+        throw new apiError(401,"Refresh token not available");
+    }
+
+   let decoded;
+    try {
+    decoded = jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET);
+    } catch (error) {
+    throw new apiError(401, "Invalid or expired refresh token");
+    }
+
+  const hashRefreshToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+        
+
+    const token  = await db.query("select * from refresh_tokens where user_id = $1 and token_hash = $2",[
+        decoded.id,
+        hashRefreshToken
+    ]);
+
+    if(token.rows.length ===0){
+        throw new apiError(401, "Invalid refresh token");
+    };
+
+    const now = new Date();
+
+    if (token.rows[0].revoked_at) {
+    throw new apiError(401, "Refresh token has been revoked");
+}
+
+    const  expiry = token.rows[0].expires_at;
+    if(expiry <= now){
+        throw new apiError(401,"the toke have been expired ");
+    }
+     
+
+     const user = await db.query(`select * from users where id = $1`,[decoded.id]);
+    if(user.rows.length === 0){
+        throw new apiError(404,"user data not found");
+    }
+
+    if(user.rows[0].is_active != true){
+        throw new apiError(403,"user is deactivated ");
+    }
+
+
+
+    const { accessToken, refreshToken: newRefreshToken } = await generateToken(user.rows[0].id);
+
+    if(!accessToken || !newRefreshToken){
+        throw new apiError(500,"failed to generate tokens");
+    };
+
+    
+  
+    const revoked_at = new Date()
+
+            await db.query(
+            `UPDATE refresh_tokens
+            SET revoked_at = $1
+            WHERE token_hash = $2`,
+            [revoked_at, hashRefreshToken]
+        );
+
+
+        const hashNewRefreshToken =  crypto.createHash('sha256').update(newRefreshToken).digest('hex');
+
+        const newExpiresAt = new Date();
+        newExpiresAt.setDate(newExpiresAt.getDate() + 30);
+
+
+            const insertToken = await db.query(
+            `insert into refresh_tokens (user_id, token_hash, expires_at, revoked_at) 
+            values ($1, $2, $3, $4) 
+            returning *`,
+            [
+                user.rows[0].id,
+                hashNewRefreshToken,
+                newExpiresAt,
+                null
+            ]
+        );
+
+        if(!insertToken.rows[0]){
+            throw new apiError(500,"Failed to store refresh token");
+        }
+    res
+    .status(200)
+    .cookie("refreshToken", newRefreshToken, options)
+    .cookie("accessToken", accessToken, options)
+    .json(new apiResponse(200,{accessToken,refreshToken: newRefreshToken},"Tokens refreshed successfully"))
+
+});
+
+const logoutUser = asyncHandler(async (req, res) => {
+    const refreshToken = req.cookies?.refreshToken;
+
+    if (!refreshToken) {
+        throw new apiError(401, "Refresh token not available");
+    }
+
+    const hashedToken = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+    await db.query(
+        "update refresh_tokens set revoked_at = now() where token_hash = $1 and user_id = $2",
+        [hashedToken, req.user.id]
+    );
+
+    res.status(200)
+       .clearCookie("accessToken", options)
+       .clearCookie("refreshToken", options)
+       .json(new apiResponse(200, {}, "Logged out successfully"));
+});
 
 
 export {
     registerUser,
     verifyEmail,
     loginUser,
-    googleCallBack
+    googleCallBack,
+    refreshTokenUser,
+    logoutUser
 }
