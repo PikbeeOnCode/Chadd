@@ -6,6 +6,7 @@ import { apiError } from "../utils/apiError.js";
 import { apiResponse } from "../utils/apiResponse.js";
 import crypto from "crypto"
 import sendVerificationEmail from "../utils/email.js";
+import { uploadOnCloudinary } from "../utils/cloudinary.js";
 import { verifyJwt } from "../middlewares/authMiddleware.middleware.js";
 
 const saltRounds = 10;
@@ -431,11 +432,92 @@ const logoutUser = asyncHandler(async (req, res) => {
 });
 
 
+
+const updateProfile = asyncHandler(async(req,res)=>{
+    const userId = req.user.id;
+    const 
+    {
+        username,
+        gender,
+        bio,
+    } = req.body;
+
+     const avatar_url_localpath = req.file?.path;
+
+      if(!userId){
+       throw new  apiError(404,"user not available");
+    };
+ 
+
+    if(!username && !gender && !bio && !avatar_url_localpath ){
+        throw new apiError(400,"no fields provided  to update")
+    }
+
+
+    const data = {
+        username,
+        gender,
+        bio
+    }
+   
+
+    const updatefields= [];
+    const values = [];
+
+  
+
+    for(const [key, value]  of Object.entries(data)){
+        if(value !== undefined && value !== ""){
+            updatefields.push(`${key} = $${values.length+1}`);
+            values.push(value);
+        }
+    };
+
+    if(avatar_url_localpath){
+        const cloudinary_url = await uploadOnCloudinary(avatar_url_localpath);
+       if (!cloudinary_url) {
+        throw new apiError(500, "Failed to upload avatar");
+    }
+
+        updatefields.push(`avatar_url = $${values.length + 1}`);
+        values.push(cloudinary_url);
+
+    };
+
+    values.push(userId);
+
+    const query = ` update users set ${updatefields.join(',')} , updated_at = now() where id = $${values.length} returning * `;
+
+    const updateresult = await db.query(query,values);
+
+   if (updateresult.rows.length === 0) {
+    throw new apiError(404, "User not found");
+}
+
+    const updates = updateresult.rows[0];
+
+    res.status(200).json(
+        new apiResponse(
+            
+                200,
+                {
+                username: updates.username,
+                gender:updates.gender,
+                bio:updates.bio,
+                avatar_url:updates.avatar_url, 
+                },
+            "profile updated sucessfully"
+        )
+    )
+});
+
+
 export {
     registerUser,
     verifyEmail,
     loginUser,
     googleCallBack,
     refreshTokenUser,
-    logoutUser
+    logoutUser,
+    updateProfile
 }

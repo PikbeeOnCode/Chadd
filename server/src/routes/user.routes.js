@@ -1,6 +1,6 @@
 import { Router,} from "express";
 import passport from "passport";
-
+import { upload } from "../middlewares/multer.middleware.js";
 import { verifyJwt } from "../middlewares/authMiddleware.middleware.js";
 
 import { 
@@ -9,7 +9,8 @@ import {
       verifyEmail,
       googleCallBack,
       refreshTokenUser,
-      logoutUser
+      logoutUser,
+      updateProfile
      }
  from "../controllers/user.controllers.js";
 const router = Router() ; 
@@ -49,6 +50,15 @@ router.post(
     verifyJwt,
     logoutUser
 );
+
+
+router.patch(
+    "/profile",
+    verifyJwt,
+    upload.single("avatar"),
+    updateProfile
+);
+
 
 
 
