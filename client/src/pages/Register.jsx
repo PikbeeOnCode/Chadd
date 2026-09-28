@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react'
 import { toast } from 'react-toastify'
 import { useRegisterMutation } from '../features/Auth/authApi'
 import chaddLogo from '../assets/chadd-logo.svg'
-{useRegisterMutation}
-
+{useRegisterMutation
+}
 const initialFormData = {
     username: "",
     email: "",
