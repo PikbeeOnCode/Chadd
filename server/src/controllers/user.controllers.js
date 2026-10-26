@@ -192,7 +192,7 @@ const verifyEmail = asyncHandler(async(req,res)=>{
         const user = await db.query("select * from users where email = $1",[email]);
         
         if(user.rows.length === 0){
-            throw new apiError(400,"Invalid email or password");
+            throw new apiError(400,"user email not found ");
         };
 
         if (!user.rows[0].is_active) {
@@ -304,10 +304,10 @@ const verifyEmail = asyncHandler(async(req,res)=>{
             email_verified: user.email_verified,
         };
 
-        res.status(200)
+        res
         .cookie("accessToken", accessToken, options)
         .cookie("refreshToken", refreshToken, options)
-        .json(new apiResponse(200, { user:safeUser}, "Google login successful"));
+        .redirect("http://localhost:5173/profile");
 
 
     });
@@ -474,13 +474,14 @@ const updateProfile = asyncHandler(async(req,res)=>{
     };
 
     if(avatar_url_localpath){
-        const cloudinary_url = await uploadOnCloudinary(avatar_url_localpath);
-       if (!cloudinary_url) {
-        throw new apiError(500, "Failed to upload avatar");
-    }
+      const cloudinary_url = await uploadOnCloudinary(avatar_url_localpath);
+
+        if (!cloudinary_url) {
+            throw new apiError(500, "Failed to upload avatar");
+        }
 
         updatefields.push(`avatar_url = $${values.length + 1}`);
-        values.push(cloudinary_url);
+        values.push(cloudinary_url.secure_url);
 
     };
 
@@ -511,6 +512,48 @@ const updateProfile = asyncHandler(async(req,res)=>{
     )
 });
 
+const getUserProfile = asyncHandler(async (req, res) => {
+    const userId = req.user.id;
+
+    if (!userId) {
+        throw new apiError(401, "User is not authenticated");
+    }
+
+    const result = await db.query(
+        `SELECT 
+            id,
+            username,
+            email,
+            gender,
+            avatar_url,
+            bio,
+            email_verified,
+            created_at,
+            updated_at
+         FROM users
+         WHERE id = $1`,
+        [userId]
+    );
+
+    if (!result.rows[0]) {
+        throw new apiError(404, "User not found");
+    }
+
+    const user = result.rows[0];
+
+    res
+        .status(200)
+        .json(
+            new apiResponse(
+                200,
+                { user },
+                "User profile fetched successfully"
+            )
+        );
+
+
+});
+
 
 export {
     registerUser,
@@ -519,5 +562,6 @@ export {
     googleCallBack,
     refreshTokenUser,
     logoutUser,
-    updateProfile
+    updateProfile,
+    getUserProfile
 }

@@ -10,7 +10,8 @@ import {
       googleCallBack,
       refreshTokenUser,
       logoutUser,
-      updateProfile
+      updateProfile,
+      getUserProfile
      }
  from "../controllers/user.controllers.js";
 const router = Router() ; 
@@ -57,6 +58,12 @@ router.patch(
     verifyJwt,
     upload.single("avatar"),
     updateProfile
+);
+
+router.get(
+    "/profile",
+    verifyJwt,
+    getUserProfile
 );
 
 

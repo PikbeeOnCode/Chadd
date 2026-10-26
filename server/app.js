@@ -3,7 +3,11 @@ import cors from "cors";
 import cookieParser from "cookie-parser"
 import session from "express-session";
 import passport from "./src/config/passport.config.js"; // adjust path to match your actual file location
+import { errorHandler } from "./src/middlewares/errorHandler.middleware.js";
+
+// routes
 import userRoutes from "./src/routes/user.routes.js"
+import postRoutes from "./src/routes/post.routes.js"
  
 const app = express();
  
@@ -28,5 +32,8 @@ app.use(passport.initialize());
 app.use(passport.session());
  
 app.use("/api/v1/users", userRoutes);
+app.use("/api/v1/posts", postRoutes);
+
+app.use(errorHandler);
  
 export { app };
