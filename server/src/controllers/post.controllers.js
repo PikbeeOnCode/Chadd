@@ -1,5 +1,7 @@
+
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { apiError } from "../utils/apiError.js";
+import { apiResponse } from "../utils/apiResponse.js";
 import {
     uploadOnCloudinary,
     deleteFromCloudinary,
@@ -10,16 +12,15 @@ import db from "../db/db.js";
 import { validate as isValidUUID } from "uuid";
 import fs from "node:fs/promises";
 
+import { isValidId, validateText } from "../utils/validation.js";
+import {
+    getPagination,
+    buildPagination,
+} from "../utils/pagination.js";
+
 /* ------------------------------ Helpers ------------------------------ */
 
-const isValidId = (id) => typeof id === "string" && /^\d{1,18}$/.test(id);
-
-const getPagination = (query) => {
-    const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
-    const limit = Math.min(50, Math.max(1, Number.parseInt(query.limit, 10) || 10));
-    return { page, limit, offset: (page - 1) * limit };
-};
-
+// Attach media to a collection of posts.
 const attachMedia = async (posts) => {
     if (posts.length === 0) return posts;
 
@@ -28,26 +29,40 @@ const attachMedia = async (posts) => {
          FROM post_media
          WHERE post_id = ANY($1)
          ORDER BY post_id, position ASC`,
-        [posts.map((p) => p.id)]
+        [posts.map((post) => post.id)]
     );
 
     const mediaByPost = new Map();
+
     for (const media of rows) {
-        if (!mediaByPost.has(media.post_id)) mediaByPost.set(media.post_id, []);
+        if (!mediaByPost.has(media.post_id)) {
+            mediaByPost.set(media.post_id, []);
+        }
+
         mediaByPost.get(media.post_id).push(media);
     }
 
-    return posts.map((p) => ({ ...p, media: mediaByPost.get(p.id) ?? [] }));
+    return posts.map((post) => ({
+        ...post,
+        media: mediaByPost.get(post.id) ?? [],
+    }));
 };
 
+// Fetch a user's posts with pagination.
 const fetchPostsPage = async (userId, query) => {
     const { page, limit, offset } = getPagination(query);
 
     const [postsResult, countResult] = await Promise.all([
         db.query(
-            `SELECT p.id, p.user_id, p.content, p.post_type,
-                    p.created_at, p.updated_at,
-                    u.username, u.avatar_url
+            `SELECT
+                p.id,
+                p.user_id,
+                p.content,
+                p.post_type,
+                p.created_at,
+                p.updated_at,
+                u.username,
+                u.avatar_url
              FROM posts AS p
              JOIN users AS u ON u.id = p.user_id
              WHERE p.user_id = $1
@@ -55,31 +70,38 @@ const fetchPostsPage = async (userId, query) => {
              LIMIT $2 OFFSET $3`,
             [userId, limit, offset]
         ),
-        db.query(`SELECT COUNT(*) FROM posts WHERE user_id = $1`, [userId]),
+
+        db.query(
+            `SELECT COUNT(*)::int AS total
+             FROM posts
+             WHERE user_id = $1`,
+            [userId]
+        ),
     ]);
 
     const posts = await attachMedia(postsResult.rows);
-    const totalPosts = Number(countResult.rows[0].count);
-    const totalPages = Math.ceil(totalPosts / limit);
+    const totalPosts = countResult.rows[0].total;
 
     return {
         posts,
-        pagination: {
-            currentPage: page,
+        pagination: buildPagination(
+            page,
             limit,
             totalPosts,
-            totalPages,
-            hasNextPage: page < totalPages,
-            hasPreviousPage: page > 1,
-        },
+            "totalPosts"
+        ),
     };
 };
 
-// ignore errors: the Cloudinary util may already have removed the file
+// Remove temporary files, ignoring files already removed by Cloudinary helper.
 const removeTempFiles = (files) =>
     Promise.allSettled(files.map((file) => fs.unlink(file.path)));
 
-/* ----------------------------- Controllers ----------------------------- */
+
+/* ----------------------------- Create Post ----------------------------- */
+
+// POST /posts
+// Create a text, image, or video post.
 
 const createPost = asyncHandler(async (req, res) => {
     const userId = req.user?.id;
@@ -91,38 +113,61 @@ const createPost = asyncHandler(async (req, res) => {
     let committed = false;
 
     try {
-        if (!userId) throw new apiError(401, "User is not authenticated");
-
-        if (typeof content !== "string" || !content.trim()) {
-            throw new apiError(400, "Caption is necessary");
+        if (!userId) {
+            throw new apiError(401, "User is not authenticated");
         }
 
+        // Caption must contain non-whitespace text.
+        const cleanContent = validateText(content, {
+            fieldName: "Caption",
+        });
+
         if (files.length > 10) {
-            throw new apiError(400, "Maximum 10 media files are allowed");
+            throw new apiError(
+                400,
+                "Maximum 10 media files are allowed"
+            );
         }
 
         let postType = "text";
 
         if (files.length > 0) {
-            const hasImage = files.some((f) => f.mimetype.startsWith("image/"));
-            const hasVideo = files.some((f) => f.mimetype.startsWith("video/"));
-            const hasUnsupported = files.some(
-                (f) => !f.mimetype.startsWith("image/") && !f.mimetype.startsWith("video/")
+            const hasImage = files.some((file) =>
+                file.mimetype.startsWith("image/")
             );
 
-            if (hasUnsupported) throw new apiError(400, "Unsupported media type");
+            const hasVideo = files.some((file) =>
+                file.mimetype.startsWith("video/")
+            );
+
+            const hasUnsupported = files.some(
+                (file) =>
+                    !file.mimetype.startsWith("image/") &&
+                    !file.mimetype.startsWith("video/")
+            );
+
+            if (hasUnsupported) {
+                throw new apiError(400, "Unsupported media type");
+            }
 
             if (hasImage && hasVideo) {
-                throw new apiError(400, "Images and videos cannot be mixed in one post");
+                throw new apiError(
+                    400,
+                    "Images and videos cannot be mixed in one post"
+                );
             }
 
             if (hasVideo && files.length > 1) {
-                throw new apiError(400, "Only one video is allowed per post");
+                throw new apiError(
+                    400,
+                    "Only one video is allowed per post"
+                );
             }
 
             postType = hasVideo ? "video" : "image";
         }
 
+        // Upload media before beginning the database transaction.
         for (const [index, file] of files.entries()) {
             const result = await uploadOnCloudinary(file.path);
 
@@ -131,7 +176,10 @@ const createPost = asyncHandler(async (req, res) => {
                 !result?.public_id ||
                 !["image", "video"].includes(result.resource_type)
             ) {
-                throw new apiError(500, "Failed to upload media to Cloudinary");
+                throw new apiError(
+                    500,
+                    "Failed to upload media to Cloudinary"
+                );
             }
 
             uploadedMedia.push({
@@ -149,7 +197,7 @@ const createPost = asyncHandler(async (req, res) => {
             `INSERT INTO posts (user_id, content, post_type)
              VALUES ($1, $2, $3)
              RETURNING *`,
-            [userId, content.trim(), postType]
+            [userId, cleanContent, postType]
         );
 
         const createdPost = postResult.rows[0];
@@ -157,39 +205,69 @@ const createPost = asyncHandler(async (req, res) => {
 
         for (const media of uploadedMedia) {
             const mediaResult = await client.query(
-                `INSERT INTO post_media (post_id, media_url, media_type, public_id, position)
-                 VALUES ($1, $2, $3, $4, $5)
-                 RETURNING *`,
-                [createdPost.id, media.media_url, media.media_type, media.public_id, media.position]
+                `INSERT INTO post_media (
+                    post_id,
+                    media_url,
+                    media_type,
+                    public_id,
+                    position
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING *`,
+                [
+                    createdPost.id,
+                    media.media_url,
+                    media.media_type,
+                    media.public_id,
+                    media.position,
+                ]
             );
+
             savedMedia.push(mediaResult.rows[0]);
         }
 
         await client.query("COMMIT");
         committed = true;
 
-        return res.status(201).json({
-            success: true,
-            message: "Post created successfully",
-            data: { post: createdPost, media: savedMedia },
-        });
+        return res.status(201).json(
+            new apiResponse(
+                201,
+                {
+                    post: createdPost,
+                    media: savedMedia,
+                },
+                "Post created successfully"
+            )
+        );
     } catch (error) {
         if (client && !committed) {
             try {
                 await client.query("ROLLBACK");
             } catch (rollbackError) {
-                console.error("Database rollback failed:", rollbackError);
+                console.error(
+                    "Database rollback failed:",
+                    rollbackError
+                );
             }
         }
 
+        // Remove uploaded Cloudinary assets if the database transaction failed.
         if (!committed) {
             const cleanupResults = await Promise.allSettled(
-                uploadedMedia.map((m) => deleteFromCloudinary(m.public_id, m.media_type))
+                uploadedMedia.map((media) =>
+                    deleteFromCloudinary(
+                        media.public_id,
+                        media.media_type
+                    )
+                )
             );
 
             for (const result of cleanupResults) {
                 if (result.status === "rejected") {
-                    console.error("Cloudinary cleanup failed:", result.reason);
+                    console.error(
+                        "Cloudinary cleanup failed:",
+                        result.reason
+                    );
                 }
             }
         }
@@ -201,36 +279,60 @@ const createPost = asyncHandler(async (req, res) => {
     }
 });
 
+
+/* ----------------------------- Update Post ----------------------------- */
+
+// PATCH /posts/:id
+// Updates the caption only. Media replacement is not handled here.
+
 const updatePost = asyncHandler(async (req, res) => {
     const userId = req.user?.id;
     const { id } = req.params;
     const { content } = req.body;
 
-    if (!userId) throw new apiError(401, "User is not authenticated");
-    if (!isValidId(id)) throw new apiError(400, "Invalid post ID");
-
-    if (typeof content !== "string" || !content.trim()) {
-        throw new apiError(400, "Caption is required");
+    if (!userId) {
+        throw new apiError(401, "User is not authenticated");
     }
+
+    if (!isValidId(id)) {
+        throw new apiError(400, "Invalid post ID");
+    }
+
+    const cleanContent = validateText(content, {
+        fieldName: "Caption",
+    });
 
     const result = await db.query(
         `UPDATE posts
-         SET content = $1, updated_at = NOW()
-         WHERE id = $2 AND user_id = $3
+         SET content = $1,
+             updated_at = NOW()
+         WHERE id = $2
+           AND user_id = $3
          RETURNING *`,
-        [content.trim(), id, userId]
+        [cleanContent, id, userId]
     );
 
     if (result.rowCount === 0) {
-        throw new apiError(404, "Post not found or you are not allowed to update it");
+        throw new apiError(
+            404,
+            "Post not found or you are not allowed to update it"
+        );
     }
 
-    return res.status(200).json({
-        success: true,
-        message: "Post updated successfully",
-        data: { post: result.rows[0] },
-    });
+    return res.status(200).json(
+        new apiResponse(
+            200,
+            { post: result.rows[0] },
+            "Post updated successfully"
+        )
+    );
 });
+
+
+/* ----------------------------- Delete Post ----------------------------- */
+
+// DELETE /posts/:id
+// Deletes the post and its media rows, then removes Cloudinary assets.
 
 const deletePost = asyncHandler(async (req, res) => {
     const userId = req.user?.id;
@@ -241,21 +343,31 @@ const deletePost = asyncHandler(async (req, res) => {
     let media = [];
 
     try {
-        if (!userId) throw new apiError(401, "User is not authenticated");
-        if (!isValidId(id)) throw new apiError(400, "Invalid post ID");
+        if (!userId) {
+            throw new apiError(401, "User is not authenticated");
+        }
+
+        if (!isValidId(id)) {
+            throw new apiError(400, "Invalid post ID");
+        }
 
         client = await db.connect();
         await client.query("BEGIN");
 
         const postResult = await client.query(
-            `SELECT id FROM posts
-             WHERE id = $1 AND user_id = $2
+            `SELECT id
+             FROM posts
+             WHERE id = $1
+               AND user_id = $2
              FOR UPDATE`,
             [id, userId]
         );
 
         if (postResult.rowCount === 0) {
-            throw new apiError(404, "Post not found or you are not allowed to delete it");
+            throw new apiError(
+                404,
+                "Post not found or you are not allowed to delete it"
+            );
         }
 
         const mediaResult = await client.query(
@@ -267,7 +379,11 @@ const deletePost = asyncHandler(async (req, res) => {
 
         media = mediaResult.rows;
 
-        await client.query(`DELETE FROM posts WHERE id = $1 AND user_id = $2`, [id, userId]);
+        await client.query(
+            `DELETE FROM posts
+             WHERE id = $1 AND user_id = $2`,
+            [id, userId]
+        );
 
         await client.query("COMMIT");
         committed = true;
@@ -276,96 +392,167 @@ const deletePost = asyncHandler(async (req, res) => {
             try {
                 await client.query("ROLLBACK");
             } catch (rollbackError) {
-                console.error("Delete post rollback failed:", rollbackError);
+                console.error(
+                    "Delete post rollback failed:",
+                    rollbackError
+                );
             }
         }
+
         throw error;
     } finally {
         client?.release();
     }
 
-    // Cloudinary cleanup only after DB commit
+    // Delete Cloudinary assets only after the database commit succeeds.
     const cleanupResults = await Promise.allSettled(
         media.map((item) => {
             if (item.public_id) {
-                return deleteFromCloudinary(item.public_id, item.media_type);
+                return deleteFromCloudinary(
+                    item.public_id,
+                    item.media_type
+                );
             }
-            // old rows without public_id -> fallback to URL based delete
-            if (item.media_type === "video") return deleteVideoFromCloudinary(item.media_url);
-            if (item.media_type === "image") return deleteImageFromCloudinary(item.media_url);
+
+            // Fallback for older media rows without a stored public_id.
+            if (item.media_type === "video") {
+                return deleteVideoFromCloudinary(item.media_url);
+            }
+
+            if (item.media_type === "image") {
+                return deleteImageFromCloudinary(item.media_url);
+            }
+
             return Promise.resolve();
         })
     );
 
     for (const result of cleanupResults) {
         if (result.status === "rejected") {
-            console.error("Cloudinary media cleanup failed:", result.reason);
+            console.error(
+                "Cloudinary media cleanup failed:",
+                result.reason
+            );
         }
     }
 
-    return res.status(200).json({
-        success: true,
-        message: "Post deleted successfully",
-    });
+    return res.status(200).json(
+        new apiResponse(
+            200,
+            {},
+            "Post deleted successfully"
+        )
+    );
 });
+
+
+/* ----------------------------- Get Post By ID ----------------------------- */
+
+// GET /posts/:id
 
 const getPostById = asyncHandler(async (req, res) => {
     const { id } = req.params;
 
-    if (!isValidId(id)) throw new apiError(400, "Invalid post ID");
+    if (!isValidId(id)) {
+        throw new apiError(400, "Invalid post ID");
+    }
 
     const postResult = await db.query(
-        `SELECT p.id, p.user_id, p.content, p.post_type,
-                p.created_at, p.updated_at,
-                u.username, u.avatar_url
+        `SELECT
+            p.id,
+            p.user_id,
+            p.content,
+            p.post_type,
+            p.created_at,
+            p.updated_at,
+            u.username,
+            u.avatar_url
          FROM posts AS p
          JOIN users AS u ON u.id = p.user_id
          WHERE p.id = $1`,
         [id]
     );
 
-    if (postResult.rowCount === 0) throw new apiError(404, "Post not found");
+    if (postResult.rowCount === 0) {
+        throw new apiError(404, "Post not found");
+    }
 
     const [post] = await attachMedia(postResult.rows);
 
-    return res.status(200).json({
-        success: true,
-        message: "Post fetched successfully",
-        data: { post },
-    });
+    return res.status(200).json(
+        new apiResponse(
+            200,
+            { post },
+            "Post fetched successfully"
+        )
+    );
 });
+
+
+/* ----------------------------- Get User Posts ----------------------------- */
+
+// GET /posts/user/:userId?page=1&limit=10
 
 const getUserPosts = asyncHandler(async (req, res) => {
     const { userId } = req.params;
 
-    if (!userId || !isValidUUID(userId)) throw new apiError(400, "Invalid user ID");
+    if (!userId || !isValidUUID(userId)) {
+        throw new apiError(400, "Invalid user ID");
+    }
 
-    const userResult = await db.query(`SELECT id FROM users WHERE id = $1`, [userId]);
+    const userResult = await db.query(
+        `SELECT id
+         FROM users
+         WHERE id = $1`,
+        [userId]
+    );
 
-    if (userResult.rowCount === 0) throw new apiError(404, "User not found");
+    if (userResult.rowCount === 0) {
+        throw new apiError(404, "User not found");
+    }
 
-    const { posts, pagination } = await fetchPostsPage(userId, req.query);
+    const { posts, pagination } = await fetchPostsPage(
+        userId,
+        req.query
+    );
 
-    return res.status(200).json({
-        success: true,
-        message: "User posts fetched successfully",
-        data: { posts, pagination },
-    });
+    return res.status(200).json(
+        new apiResponse(
+            200,
+            { posts, pagination },
+            "User posts fetched successfully"
+        )
+    );
 });
+
+
+/* ----------------------------- Get My Posts ----------------------------- */
+
+// GET /posts/my-posts?page=1&limit=10
 
 const getMyPosts = asyncHandler(async (req, res) => {
     const userId = req.user?.id;
 
-    if (!userId) throw new apiError(401, "User is not authenticated");
+    if (!userId) {
+        throw new apiError(401, "User is not authenticated");
+    }
 
-    const { posts, pagination } = await fetchPostsPage(userId, req.query);
+    const { posts, pagination } = await fetchPostsPage(
+        userId,
+        req.query
+    );
 
-    return res.status(200).json({
-        success: true,
-        message: "Your posts fetched successfully",
-        data: { posts, pagination },
-    });
+    return res.status(200).json(
+        new apiResponse(
+            200,
+            { posts, pagination },
+            "Your posts fetched successfully"
+        )
+    );
 });
+
+
+/* ------------------------------ Exports ------------------------------ */
 
 export {
     createPost,

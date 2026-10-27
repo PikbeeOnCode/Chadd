@@ -8,6 +8,7 @@ import { errorHandler } from "./src/middlewares/errorHandler.middleware.js";
 // routes
 import userRoutes from "./src/routes/user.routes.js"
 import postRoutes from "./src/routes/post.routes.js"
+import commentRoutes from "./src/routes/comment.routes.js"
  
 const app = express();
  
@@ -33,6 +34,7 @@ app.use(passport.session());
  
 app.use("/api/v1/users", userRoutes);
 app.use("/api/v1/posts", postRoutes);
+app.use("/api/v1/comments", commentRoutes);
 
 app.use(errorHandler);
  
